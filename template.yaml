@@ -1,0 +1,277 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  ETH2 Validator BLS Key Generator
+
+Globals:
+  Function:
+    Timeout: 120
+
+Parameters:
+  SigningProfileVersionArnParameter:
+    Type: String
+    Description: Lambda Code Signing Profile ARN
+    Default: ""
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.200.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: "secure-keygen-vpc"
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W60
+            reason: "Only Lambda is deployed on this VPC. No need for flow log"
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 1, !GetAZs  '' ]
+      CidrBlock: 10.200.0.0/24
+      MapPublicIpOnLaunch: false
+  
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet
+
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Validator Lambda Security Group
+      VpcId: !Ref VPC
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: Allow to all destinations
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W5
+            reason: "Lambda function need to interact with other AWS services"
+
+  EndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: VPC Endpoint Security Group
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !GetAtt VPC.CidrBlock
+          Description: Allow from VPC
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !GetAtt VPC.CidrBlock
+          Description: Allow to VPC
+
+  KMSEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcEndpointType: Interface
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.kms'
+      PrivateDnsEnabled: true
+      VpcId: !Ref VPC
+      SubnetIds: 
+        - !Ref PrivateSubnet
+      SecurityGroupIds:
+        - !Ref EndpointSecurityGroup
+
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action:
+              - 's3:*'
+            Resource:
+              - '*'
+      RouteTableIds:
+        - !Ref PrivateRouteTable
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcId: !Ref VPC
+
+  DynamoDBEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action:
+              - 'dynamodb:BatchWriteItem'
+              - 'dynamodb:DeleteItem'
+              - 'dynamodb:DescribeTable'
+              - 'dynamodb:PutItem'
+              - 'dynamodb:UpdateItem'
+            Resource:
+              - '*'
+      RouteTableIds:
+        - !Ref PrivateRouteTable
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.dynamodb'
+      VpcId: !Ref VPC
+
+  ValidatorKeyGenFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Zip
+      CodeUri: secure_keygen/
+      Handler: app.lambda_handler
+      Runtime: python3.9
+      MemorySize: 1024
+      CodeSigningConfigArn: !Ref SignedFunctionCodeSigningConfig
+      ReservedConcurrentExecutions: 1
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnet
+      Environment:
+        Variables:
+          KMS_KEY_ARN:
+            Fn::GetAtt:
+            - Key
+            - Arn
+          DDB_TABLE_NAME:
+            Ref: ValidatorKeysTable
+          LOG_LEVEL: "DEBUG"
+      Architectures:
+        - x86_64
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+          - Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Effect: Allow
+            Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*'
+          - Action:
+            - kms:Encrypt
+            - kms:GenerateDataKey*
+            - kms:ReEncrypt*
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+              - Key
+              - Arn
+          - Action:
+            - dynamodb:BatchWriteItem
+            - dynamodb:DeleteItem
+            - dynamodb:DescribeTable
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            Effect: Allow
+            Resource:
+            - Fn::GetAtt:
+              - ValidatorKeysTable
+              - Arn
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: "False positive - https://github.com/stelligent/cfn_nag/issues/601"
+  
+  # CodeSigningConfig drift detection not supported: 
+  # https://github.com/aws-cloudformation/cloudformation-coverage-roadmap/issues/954
+  SignedFunctionCodeSigningConfig:
+    Type: AWS::Lambda::CodeSigningConfig
+    Properties:
+      Description: "Code Signing for ValidatorKeyGenFunction"
+      AllowedPublishers:
+        SigningProfileVersionArns:
+        - !Ref SigningProfileVersionArnParameter
+      CodeSigningPolicies:
+        UntrustedArtifactOnDeployment: "Enforce"
+
+  ValidatorKeysTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      KeySchema:
+        - AttributeName: web3signer_uuid
+          KeyType: HASH
+        - AttributeName: pubkey
+          KeyType: RANGE
+      AttributeDefinitions:
+        - AttributeName: web3signer_uuid
+          AttributeType: S
+        - AttributeName: pubkey
+          AttributeType: S
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+      SSESpecification:
+        SSEEnabled: true
+      BillingMode: PROVISIONED
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+
+  Key:
+    Type: AWS::KMS::Key
+    Properties:
+      KeyPolicy:
+        Statement:
+          - Action: 
+            - "kms:Create*"
+            - "kms:Describe*"
+            - "kms:Enable*"
+            - "kms:Encrypt"
+            - "kms:List*"
+            - "kms:Put*"
+            - "kms:Update*"
+            - "kms:Revoke*"
+            - "kms:Disable*"
+            - "kms:Get*"
+            - "kms:Delete*"
+            - "kms:ScheduleKeyDeletion"
+            - "kms:CancelKeyDeletion"
+            - "kms:GenerateDataKey*"
+            - "kms:TagResource"
+            - "kms:UntagResource"
+            # - "kms:Decrypt" # Uncomment to debug
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Resource: "*"
+        Version: "2012-10-17"
+      EnableKeyRotation: true
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+
+Outputs:
+  ValidatorKeyGenFunction:
+    Description: "Lambda Function ARN"
+    Value: !GetAtt ValidatorKeyGenFunction.Arn
+  ValidatorKeyGenFunctionIamRole:
+    Description: "Implicit IAM Role created for function"
+    Value: !GetAtt ValidatorKeyGenFunctionRole.Arn
+  ValidatorKeysTable:
+    Description: "DynamoDB Table Arn"
+    Value: !GetAtt ValidatorKeysTable.Arn
+  Key:
+    Description: "KMS Key"
+    Value: !GetAtt Key.Arn

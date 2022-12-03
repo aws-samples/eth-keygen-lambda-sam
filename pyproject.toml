@@ -1,0 +1,37 @@
+[tool.poetry]
+name = "eth2-keygen-sam"
+version = "0.1.0"
+description = ""
+authors = ["Aldred Benedict <aldreb@amazon.com>"]
+readme = "README.md"
+packages = []
+
+[tool.poetry.dependencies]
+python = "^3.9"
+cached-property = "1.5.2"
+click = "8.1.3"
+cytoolz = "0.11.2"
+eth-hash = "0.3.2"
+eth-typing = "2.3.0"
+eth-utils = "1.10.0"
+lru-dict = "1.1.7"
+mypy-extensions = "0.4.3"
+py-ecc = "5.2.0"
+pycryptodome = "3.14.1"
+pyrsistent = "0.16.1"
+six = "1.16.0"
+ssz = "0.2.4"
+toolz = "0.11.2"
+staking-deposit = {git = "https://github.com/ethereum/staking-deposit-cli.git", rev = "v2.3.0"}
+boto3 = "^1.26.9"
+botocore = "^1.29.10"
+
+[tool.poetry.group.dev.dependencies]
+pre-commit = "^2.20.0"
+cfn-lint = "^0.71.1"
+bandit = "^1.7.4"
+black = "^22.10.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

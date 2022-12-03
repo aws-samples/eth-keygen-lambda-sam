@@ -1,0 +1,6 @@
+{
+    "num_validators": 2,
+    "mnemonic_language": "english",
+    "chain": "goerli",
+    "eth1_withdrawal_address": "0x6F4b46423fc6181a0cF34e6716c220BD4d6C2471"
+}
